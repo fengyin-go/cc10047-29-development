@@ -40,3 +40,23 @@ class BackfillPipelineService(BaseModuleService):
             "failed_partitions": entry.get("失败分区"),
             "progress_percent": 100,
         }
+
+    def domain_arrange_batch(
+        self,
+        requests: list[dict[str, Any]],
+        *,
+        table: str,
+        name: str | None = None,
+    ) -> dict[str, Any]:
+        """批量回填安排：一次提交多条历史分区请求，产出可核对的分区回填计划。"""
+        from app.services.backfill_plan import BackfillPlanError, backfill_repository
+
+        try:
+            result = backfill_repository.submit_plan({
+                "name": name,
+                "table": table,
+                "requests": requests,
+            })
+        except BackfillPlanError as error:
+            return {"ok": False, "message": str(error)}
+        return {"ok": True, "message": result["message"], **result}

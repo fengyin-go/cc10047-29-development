@@ -36,3 +36,45 @@ class BatchMergeService(BaseModuleService):
             "conflict_resolution": entry.get("冲突解决", "batch-wins"),
             **result,
         }
+
+    def domain_receive_backfill_plan(
+        self,
+        entry_id: int,
+        plan_id: str,
+        completed_partitions: list[str],
+        *,
+        receipt_id: str | None = None,
+    ) -> dict[str, Any]:
+        """批流合并按分区回填计划接收实际完成的分区，逐条写入所属原请求。
+
+        交集分区由计划里的裁决结果决定写入哪个原请求；同一回执重放时
+        只记一次实际完成，结果回写到回填合并队列。
+        """
+        entry = store.find(self.MODULE, entry_id)
+        if not entry:
+            return {"ok": False, "message": f"合并管道 {entry_id} 不存在"}
+        from app.services.backfill_plan import backfill_repository
+
+        result, message = backfill_repository.complete_partitions(
+            plan_id,
+            completed_partitions=completed_partitions,
+            receipt_id=receipt_id,
+            source=f"batch_merge:{entry.get('管道标识')}",
+        )
+        if result is None:
+            return {"ok": False, "message": message}
+        return {
+            "ok": result["ok"],
+            "message": message,
+            "pipeline": entry.get("管道标识"),
+            "table": entry.get("目标湖表"),
+            "plan_id": plan_id,
+            "receipt_id": result["receipt_id"],
+            "duplicate_receipt": result["duplicate_receipt"],
+            "applied_count": result["applied_count"],
+            "duplicate_count": result["duplicate_count"],
+            "rejected_count": result["rejected_count"],
+            "results": result["results"],
+            "writeback_queue": result["queue"],
+            "plan_status": result["plan"]["status"],
+        }

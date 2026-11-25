@@ -6,6 +6,15 @@
         <p class="page-desc">{{ meta.desc }}</p>
       </div>
       <div class="page-actions">
+        <button
+          v-if="meta.key === 'backfill_pipeline'"
+          class="btn"
+          data-testid="open-backfill-plans"
+          type="button"
+          @click="openBackfillPlans"
+        >
+          批量回填安排
+        </button>
         <button class="btn primary" data-testid="open-create" type="button" @click="openCreate">
           登记{{ meta.entity }}
         </button>
@@ -95,6 +104,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 
 import {
   createEntry,
@@ -106,6 +116,7 @@ import {
 import type { EntryRow } from '@/data/types'
 
 const props = defineProps<{ moduleKey: string }>()
+const router = useRouter()
 const meta = moduleMeta(props.moduleKey)
 const rows = ref<EntryRow[]>([])
 const total = ref(0)
@@ -144,8 +155,11 @@ async function exportRows() {
   }
 }
 
-function openCreate() {
-  createValues.value = Object.fromEntries(meta.fields.map((field) => [field, '']))
+function openBackfillPlans() {
+  void router.push('/backfill-plans')
+}
+
+function openCreate() {  createValues.value = Object.fromEntries(meta.fields.map((field) => [field, '']))
   errorMessage.value = ''
   showCreate.value = true
 }

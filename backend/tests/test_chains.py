@@ -96,3 +96,29 @@ class TestHealthAndOverview:
         data = resp.json()
         assert "cards" in data
         assert "modules" in data
+
+class TestChainBackfillBatch:
+    def test_chain_arrange_and_receive(self):
+        resp = client.post(
+            "/api/chains/backfill-batch",
+            json={
+                "table": "dwd_order",
+                "requests": [
+                    {"label": "追加区间", "start_partition": "p1", "end_partition": "p3", "mode": "append"},
+                    {"label": "替换区间", "start_partition": "p2", "end_partition": "p4", "mode": "replace"},
+                ],
+                "completed_partitions": ["p1", "p2", "p3"],
+                "receipt_id": "CHAIN-1",
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert [step["step"] for step in data["steps"]] == [
+            "arrange_backfill", "confirm_plan", "merge_queue", "batch_merge_receive",
+        ]
+        assert data["steps"][3]["details"]["applied_count"] == 3
+
+    def test_chain_requires_input(self):
+        resp = client.post("/api/chains/backfill-batch", json={"table": "dwd_order"})
+        assert resp.status_code == 400

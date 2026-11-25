@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from app.services import service_for
 
@@ -238,3 +239,109 @@ def chain_metadata_govern(lineage_id: int, audit_id: int, catalog_id: int) -> di
         "audit_tables": r2.get("tables_checked"),
         "synced_tables": r3.get("synced_tables"),
     }}
+
+# ------------------------------------------------------------------
+# 链路6: 批量回填
+# backfill_arrange→plan_confirm→merge_queue→batch_merge_receive
+# ------------------------------------------------------------------
+
+class BackfillBatchIn(BaseModel):
+    table: str
+    requests: list[dict] | None = None
+    plan_id: str | None = None
+    completed_partitions: list[str] | None = None
+    receipt_id: str | None = None
+
+
+@router.post("/backfill-batch")
+def chain_backfill_batch(payload: BackfillBatchIn) -> dict:
+    """批量回填链路：安排 → 确认 → 刷新合并队列 → 批流合并接收完成分区。
+
+    - 传 requests 时先安排一次批量回填（多条原请求同批提交）；
+    - 也可以直接传已存在的 plan_id 继续后半段；
+    - completed_partitions 为空时只走到「刷新合并队列」这一步。
+    """
+    from app.services.backfill_plan import BackfillPlanError, backfill_repository
+
+    table = payload.table
+    requests = payload.requests
+    plan_id = payload.plan_id
+    completed_partitions = payload.completed_partitions
+    receipt_id = payload.receipt_id
+    steps: list[dict] = []
+
+    if plan_id is None:
+        if not requests:
+            raise HTTPException(400, "需要提供 requests 或 plan_id")
+        try:
+            arranged = backfill_repository.submit_plan({
+                "name": "批量回填链路",
+                "table": table,
+                "requests": requests,
+            })
+        except BackfillPlanError as error:
+            raise HTTPException(400, str(error)) from error
+        plan_id = arranged["plan"]["plan_id"]
+        steps.append({
+            "step": "arrange_backfill",
+            "ok": True,
+            "details": {
+                "plan_id": plan_id,
+                "duplicate_submissions": arranged["duplicate_submissions"],
+                "coverage": arranged["plan"]["coverage"],
+                "intersection": arranged["queue"]["intersection"]["dispositions"],
+            },
+        })
+
+    confirmed, message, already = backfill_repository.confirm_plan(plan_id)
+    steps.append({
+        "step": "confirm_plan",
+        "ok": confirmed is not None and "仍需裁决" not in message,
+        "details": {"message": message, "already_confirmed": already},
+    })
+    if confirmed is None or "仍需裁决" in message:
+        return {"chain": "backfill-batch", "ok": False, "steps": steps, "error": message}
+
+    queue = backfill_repository.merge_queue_item(plan_id)
+    steps.append({
+        "step": "merge_queue",
+        "ok": queue is not None,
+        "details": {
+            "status": queue["status"] if queue else None,
+            "next_committable": queue["next_committable_partitions"] if queue else [],
+        },
+    })
+
+    if completed_partitions:
+        svc_merge = service_for("batch_merge")
+        if not svc_merge:
+            raise HTTPException(404, "batch_merge 服务未注册")
+        received = svc_merge.domain_receive_backfill_plan(
+            1, plan_id, completed_partitions, receipt_id=receipt_id)
+        steps.append({
+            "step": "batch_merge_receive",
+            "ok": received["ok"],
+            "details": {
+                "applied_count": received.get("applied_count"),
+                "duplicate_count": received.get("duplicate_count"),
+                "rejected_count": received.get("rejected_count"),
+                "results": received.get("results"),
+            },
+        })
+        return {
+            "chain": "backfill-batch",
+            "ok": received["ok"],
+            "steps": steps,
+            "summary": {
+                "plan_id": plan_id,
+                "received": received.get("plan_status"),
+                "writeback_queue": received.get("writeback_queue", {}).get("status"),
+            },
+        }
+
+    return {
+        "chain": "backfill-batch",
+        "ok": True,
+        "steps": steps,
+        "summary": {"plan_id": plan_id, "next_committable": queue["next_committable_partitions"] if queue else []},
+    }
